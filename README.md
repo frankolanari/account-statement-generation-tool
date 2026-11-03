@@ -10,7 +10,9 @@ This project replaces a fragile 22-node n8n workflow with a tested, modular Type
 
 **[Live app](https://account-statement-generator.vercel.app)** (sign-in requires a passcode, so [ask me for one](https://www.linkedin.com/in/azifrank)) · [Engineering notes](docs/engineering-notes.md)
 
-> SendFast is a fictional company used for this showcase. This repository contains no customer data or production credentials.
+> **Unofficial project.** I built this independently. The live app and demo video use WorldRemit branding, but this is not an official WorldRemit product or demo, and it is not affiliated with or endorsed by WorldRemit. The statements use demo data.
+>
+> The code in this repository uses SendFast, a fictional company, for its branding. It contains no customer data or production credentials.
 
 [![Watch the 4-minute demo: web app, API and Slack agent](docs/assets/demo-thumbnail.png)](https://cap.so/s/sqd4vhnx6rmcweq)
 
