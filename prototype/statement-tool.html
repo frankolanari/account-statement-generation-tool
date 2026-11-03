@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Statement Tool Prototype</title>
+  <!-- UI prototype only: fake data, no backend. Open this file in a browser; edit, save, refresh. -->
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <!-- React and react-day-picker (the engine behind shadcn's Calendar) as ES modules, one React instance -->
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1",
+      "react-day-picker": "https://esm.sh/react-day-picker@9.4.4?deps=react@18.3.1,react-dom@18.3.1"
+    }
+  }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: Geist, ui-sans-serif, system-ui, sans-serif; font-feature-settings: "tnum" 0; }
+    .mono { font-family: 'Geist Mono', ui-monospace, monospace; }
+    .num { font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+    /* beautifului LoadingState: pixel grid + shimmering label */
+    @keyframes pixel-on { 0%,100% { opacity: .15 } 18%,42% { opacity: 1 } 62% { opacity: .15 } }
+    @keyframes shimmer-text { from { background-position: 150% center } to { background-position: -50% center } }
+    .shimmer { background-image: linear-gradient(90deg, #a1a1aa 35%, #18181b 50%, #a1a1aa 65%); background-size: 200% 100%;
+      -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer-text 1.4s linear infinite; }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+    .rise { animation: rise .35s cubic-bezier(.16,1,.3,1) both }
+    @media (prefers-reduced-motion: reduce) { .rise, .animate-pulse, .shimmer { animation: none !important } }
+  </style>
+</head>
+<body class="min-h-screen bg-[#fafafa] text-zinc-950 antialiased">
+<div id="root"></div>
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import { DayPicker } from 'react-day-picker';
+
+/* ───────── fake backend ───────── */
+const ACCOUNTS = [
+  { user_id: '6f1c2a9b8e7d4c3b2a1f0e9d', full_name: 'Barrie Morris', email: 'barrie.morris@example.com', country: 'GB', base_currency: 'GBP',
+    transaction_count: 68, first_transaction_date: '2026-05-02', last_transaction_date: '2026-10-21' },
+  { user_id: '9a8b7c6d5e4f3a2b1c0d9e8f', full_name: 'Barrie Morris', email: 'barrie.morris@example.com', country: 'NG', base_currency: 'NGN',
+    transaction_count: 4210, first_transaction_date: '2021-03-14', last_transaction_date: '2026-10-27' },
+];
+/* ───────── "Built by" card: edit these three values ───────── */
+const BUILT_BY = {
+  name: 'Azi',
+  photo: 'azi.png',                                   // next to this file (prototype/azi.png)
+  linkedin: 'https://www.linkedin.com/in/azifrank',
+};
+
+const SCENARIOS = {
+  found: 'Account found',
+  multiple: 'Several accounts match',
+  notfound: 'Account not found',
+  truncated: 'Statement truncated (record limit)',
+  error: 'Server error (search)',
+  previewerror: 'Server error (preview)',
+};
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const serverError = () => Object.assign(new Error('Something went wrong'), { code: 'SERVER', ref: '23f97212-6e72-4ff2-98b8-6e832af1dfcf' });
+const fake = {
+  async lookup(scenario) {
+    await wait(1400);
+    if (scenario === 'notfound') throw Object.assign(new Error("I'm afraid I couldn't find a valid email address or User ID."), { code: 'USER_NOT_FOUND' });
+    if (scenario === 'error') throw serverError();
+    if (scenario === 'multiple') return { status: 'ACCOUNT_SELECTION_REQUIRED', accounts: ACCOUNTS };
+    return { status: 'USER_FOUND', account: ACCOUNTS[scenario === 'truncated' ? 1 : 0] };
+  },
+  async preview(scenario, account, range) {
+    await wait(2200);
+    if (scenario === 'previewerror') throw serverError();
+    // Fake record limit: long ranges on the big account stop ~700 days in; shorter ranges fit.
+    const span = days(range.from, range.to);
+    const truncated = scenario === 'truncated' && span > 700;
+    const cut = toDate(range.from); cut.setDate(cut.getDate() + 699);
+    const inRange = scenario === 'truncated' ? Math.round(account.transaction_count * Math.min(1, span / 2055)) : account.transaction_count;
+    const meta = { input_txn_count: inRange, output_txn_count: truncated ? 1500 : inRange,
+      is_truncated: truncated, effective_period: { from: range.from, to: truncated ? toIso(cut) : range.to } };
+    return { html: statementHtml(account, meta), meta };
+  },
+  async download() { await wait(1300); },
+};
+function statementHtml(a, meta) {
+  const rows = Array.from({ length: 16 }, (_, i) => `<tr><td>2026-10-${String(27 - i).padStart(2, '0')}</td><td>TXN${100230 - i}</td><td>Transfer</td><td>Sample Recipient ${i + 1}</td><td style="text-align:right">${(120 + i * 37.5).toFixed(2)} ${a.base_currency}</td><td>SUCCESS</td></tr>`).join('');
+  return `<html><body style="font-family:Helvetica,Arial;padding:40px;color:#111;margin:0"><h2 style="margin:0">Customer Account Statement</h2>
+    <p style="color:#666;margin:4px 0 24px">${a.full_name} · ${a.email} · ${meta.effective_period.from} to ${meta.effective_period.to}</p>
+    <table style="width:100%;border-collapse:collapse;font-size:12px" cellpadding="7"><thead style="background:#f4f4f5;text-align:left">
+    <tr><th>Date</th><th>Reference</th><th>Type</th><th>Beneficiary</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead>
+    <tbody>${rows}</tbody></table><p style="color:#999;font-size:11px;margin-top:24px">Sample data for the UI prototype.</p></body></html>`;
+}
+
+/* ───────── helpers ───────── */
+const toDate = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
+const toIso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const today = () => toIso(new Date());
+const show = iso => iso ? toDate(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+const days = (from, to) => Math.round((toDate(to) - toDate(from)) / 864e5) + 1;
+const flag = cc => cc && cc.length === 2 ? String.fromCodePoint(...[...cc.toUpperCase()].map(c => 127397 + c.charCodeAt(0))) : '🏳️';
+const cx = (...c) => c.filter(Boolean).join(' ');
+
+/* ───────── icons (Lucide, same set as the app) ───────── */
+function Icon({ name, className = 'size-4' }) {
+  const node = (window.lucide.icons || window.lucide)[name];
+  if (!node) return null;
+  const children = Array.isArray(node[2]) ? node[2] : node;
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      {children.map(([tag, attrs], i) => React.createElement(tag, { ...attrs, key: i }))}
+    </svg>
+  );
+}
+
+/* ───────── shadcn-style primitives: neutral, hairline borders ───────── */
+const Button = ({ variant = 'default', size = 'md', className, ...p }) => (
+  <button {...p} className={cx('inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2',
+    { sm: 'h-8 px-3', md: 'h-9 px-3.5', lg: 'h-10 px-4' }[size],
+    { default: 'bg-zinc-900 text-white hover:bg-zinc-800', outline: 'border border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-50',
+      ghost: 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
+      /* raised, pressable: gradient body, top highlight, crisp outline, sinks 1px on press */
+      tactile: 'bg-gradient-to-b from-zinc-700 to-zinc-900 text-white shadow-[inset_0_1px_0_rgb(255_255_255/.18),0_0_0_1px_rgb(9_9_11),0_2px_3px_-1px_rgb(0_0_0/.3)] hover:from-zinc-600 hover:to-zinc-800 active:translate-y-px active:shadow-[inset_0_1px_2px_rgb(0_0_0/.35),0_0_0_1px_rgb(9_9_11)]',
+      tactileLight: 'bg-gradient-to-b from-white to-zinc-100 text-zinc-800 shadow-[inset_0_1px_0_#fff,0_0_0_1px_rgb(24_24_27/.14),0_2px_3px_-1px_rgb(0_0_0/.08)] hover:to-zinc-200/70 active:translate-y-px active:shadow-[inset_0_1px_2px_rgb(0_0_0/.08),0_0_0_1px_rgb(24_24_27/.14)]' }[variant], className)} />
+);
+const IconButton = ({ icon, label, ...p }) => (
+  <button {...p} title={label} aria-label={label} className="flex size-9 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900"><Icon name={icon} /></button>
+);
+const Panel = ({ className, ...p }) => <div {...p} className={cx('rounded-xl border border-zinc-200 bg-white', className)} />;
+const Skeleton = ({ className = '', style }) => <div style={style} className={cx('animate-pulse bg-zinc-100', !/\brounded/.test(className) && 'rounded-md', className)} />;
+const Field = ({ icon, ...p }) => (
+  <div className="relative flex-1">
+    {icon && <Icon name={icon} className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-400" />}
+    <input {...p} className={cx('h-10 w-full rounded-lg border border-zinc-200 bg-white text-sm outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-100', icon ? 'pl-9 pr-3' : 'px-3', p.className)} />
+  </div>
+);
+/* Neutral notice: icon tile, title, one line, next action. Colour is only an accent on the tile. */
+const TONES = { neutral: 'border-zinc-200 bg-zinc-50 text-zinc-600', danger: 'border-red-100 bg-red-50 text-red-600', warning: 'border-amber-100 bg-amber-50 text-amber-600' };
+const Notice = ({ tone = 'neutral', icon, title, children, actions }) => (
+  <div role={tone === 'neutral' ? 'status' : 'alert'} className="rise flex gap-3.5 rounded-xl border border-zinc-200 bg-white p-4">
+    <div className={cx('flex size-9 shrink-0 items-center justify-center rounded-lg border', TONES[tone])}><Icon name={icon} /></div>
+    <div className="min-w-0 flex-1">
+      <p className="text-sm font-medium text-zinc-900">{title}</p>
+      <div className="mt-0.5 text-sm text-zinc-500">{children}</div>
+      {actions && <div className="mt-3 flex flex-wrap items-center gap-2">{actions}</div>}
+    </div>
+  </div>
+);
+function RefChip({ value }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button title="Copy reference" onClick={() => { navigator.clipboard?.writeText(value); setDone(true); setTimeout(() => setDone(false), 1200); }}
+      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 text-xs text-zinc-600 hover:bg-zinc-100">
+      <span className="text-zinc-400">Ref</span><span className="mono">{value.slice(0, 8)}</span><Icon name={done ? 'Check' : 'Copy'} className="size-3.5 text-zinc-400" />
+    </button>
+  );
+}
+function Problem({ error, searched, onSearchAgain }) {
+  if (error.code === 'USER_NOT_FOUND') return (
+    <Notice icon="UserX" title="No account found" actions={<Button variant="tactileLight" size="sm" onClick={onSearchAgain}><Icon name="Search" className="size-3.5" />Search again</Button>}>
+      Nothing matches <span className="font-medium text-zinc-900">“{searched}”</span>.
+      <ul className="mt-2 grid gap-1">
+        <li className="flex items-center gap-2"><Icon name="Dot" className="size-4 text-zinc-400" />Check the spelling of the email address</li>
+        <li className="flex items-center gap-2"><Icon name="Dot" className="size-4 text-zinc-400" />Or search by user ID (19–26 letters and numbers)</li>
+      </ul>
+    </Notice>
+  );
+  if (error.code === 'SERVER') return (
+    <Notice tone="danger" icon="ServerCrash" title="Something went wrong"
+      actions={<><Button variant="tactile" size="sm" onClick={error.retry}><Icon name="RotateCw" className="size-3.5" />Try again</Button>{error.ref && <RefChip value={error.ref} />}</>}>
+      The request didn’t complete. Try again, and if it keeps failing, share the reference with the team.
+    </Notice>
+  );
+  return <Notice tone="warning" icon="CircleAlert" title="Couldn’t continue">{error.message}</Notice>;
+}
+
+/* One panel split into cells, like the reference's KPI row */
+const Strip = ({ children, cols = 4 }) => (
+  <div className={cx('grid divide-y divide-zinc-200 overflow-hidden rounded-xl border border-zinc-200 bg-white sm:divide-x sm:divide-y-0',
+    { 3: 'sm:grid-cols-3', 4: 'sm:grid-cols-4' }[cols])}>{children}</div>
+);
+const Cell = ({ label, value, sub, big, mono, action }) => (
+  <div className="min-w-0 px-4 py-3.5">
+    <div className="flex items-center justify-between gap-2"><p className="text-[13px] text-zinc-500">{label}</p>{action}</div>
+    <p className={cx('mt-1.5 truncate num', big ? 'text-2xl font-semibold' : 'text-[15px] font-medium', mono && 'mono text-[13px] font-normal tracking-normal')}>{value}</p>
+    {sub && <p className="mt-1 text-xs text-zinc-500">{sub}</p>}
+  </div>
+);
+
+/* beautifului LoadingState (Dots variant) with elapsed timer */
+function LoadingState({ label }) {
+  const [t, setT] = useState(0);
+  useEffect(() => { const s = Date.now(); const id = setInterval(() => setT((Date.now() - s) / 1000), 100); return () => clearInterval(id); }, []);
+  const delays = Array.from({ length: 9 }, (_, i) => ((i % 3) + Math.abs(Math.floor(i / 3) - 1)) * 90);
+  return (
+    <div role="status" className="flex items-center gap-2.5">
+      <div className="grid grid-cols-3 gap-[2px]">{delays.map((d, i) => <span key={i} className="size-[4px] rounded-full bg-zinc-900" style={{ animation: `pixel-on 650ms ${d}ms infinite` }} />)}</div>
+      <span className="shimmer text-[13px] font-medium">{label}</span>
+      <span className="mono text-xs tabular-nums text-zinc-400">{t.toFixed(1)}s</span>
+    </div>
+  );
+}
+
+/* ───────── account pieces ───────── */
+function Avatar({ name, size = 'lg' }) {
+  const initials = name.split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+  return <div className={cx('flex shrink-0 items-center justify-center rounded-full border border-zinc-200 bg-zinc-50 font-medium text-zinc-700',
+    size === 'lg' ? 'size-11 text-sm' : 'size-8 text-xs')}>{initials}</div>;
+}
+const Tag = ({ children }) => <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-xs font-medium text-zinc-700">{children}</span>;
+function CopyButton({ text }) {
+  const [done, setDone] = useState(false);
+  return <button title="Copy user ID" onClick={() => { navigator.clipboard?.writeText(text); setDone(true); setTimeout(() => setDone(false), 1200); }}
+    className="-m-1 rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"><Icon name={done ? 'Check' : 'Copy'} className="size-3.5" /></button>;
+}
+function AccountCard({ account, confirmed, onConfirm, onSearchAgain }) {
+  return (
+    <div className="rise grid gap-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <Avatar name={account.full_name} />
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold tracking-tight">{account.full_name}</p>
+          <p className="truncate text-sm text-zinc-500">{account.email}</p>
+        </div>
+        <div className="flex gap-1.5"><Tag>{flag(account.country)} {account.country}</Tag><Tag>{account.base_currency}</Tag></div>
+      </div>
+      <Strip>
+        <Cell label="Transactions" value={account.transaction_count.toLocaleString()} big />
+        <Cell label="First transaction" value={show(account.first_transaction_date)} />
+        <Cell label="Last transaction" value={show(account.last_transaction_date)} />
+        <Cell label="User ID" value={account.user_id} mono action={<CopyButton text={account.user_id} />} />
+      </Strip>
+      {!confirmed && (
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <Button onClick={onConfirm}>Confirm account<Icon name="ArrowRight" /></Button>
+          <Button variant="ghost" onClick={onSearchAgain}>Search again</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+function AccountSkeleton() {
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center gap-3"><Skeleton className="size-11 rounded-full" /><div className="flex-1"><Skeleton className="h-4 w-40" /><Skeleton className="mt-2 h-3.5 w-56" /></div><Skeleton className="h-6 w-24" /></div>
+      <Strip>{[0, 1, 2, 3].map(i => <div key={i} className="px-4 py-3.5"><Skeleton className="h-3.5 w-20" /><Skeleton className="mt-2.5 h-6 w-24" /></div>)}</Strip>
+    </div>
+  );
+}
+function DocumentSkeleton() {
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 sm:p-8">
+      <div className="mx-auto max-w-2xl rounded-md border border-zinc-200 bg-white p-8">
+        <Skeleton className="h-6 w-64" /><Skeleton className="mt-2 h-4 w-80" />
+        <Skeleton className="mt-6 h-8 w-full" />
+        <div className="mt-3 grid gap-3">{Array.from({ length: 9 }, (_, i) => <Skeleton key={i} className="h-4" style={{ width: `${92 - (i % 3) * 7}%` }} />)}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────── date range picker: shadcn Calendar styling on react-day-picker ───────── */
+const navButton = 'absolute top-0 z-10 inline-flex size-8 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 disabled:pointer-events-none disabled:opacity-40';
+const CALENDAR = {
+  root: 'relative', months: 'flex flex-col gap-6 sm:flex-row', month: 'flex flex-col gap-3',
+  nav: '', button_previous: cx(navButton, 'left-0'), button_next: cx(navButton, 'right-0'), chevron: 'size-4 fill-current',
+  month_caption: 'flex h-8 items-center justify-center', dropdowns: 'flex items-center gap-1.5',
+  dropdown_root: 'relative inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white px-2 text-sm font-medium hover:bg-zinc-50',
+  dropdown: 'absolute inset-0 cursor-pointer opacity-0', caption_label: 'flex items-center gap-1 text-sm font-medium [&>svg]:size-3.5 [&>svg]:fill-zinc-500',
+  month_grid: 'border-collapse', weekdays: 'flex', weekday: 'w-9 text-center text-xs font-normal text-zinc-400', week: 'mt-1 flex',
+  day: 'relative size-9 p-0 text-center text-sm', day_button: 'size-9 rounded-md transition-colors hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400',
+  range_start: 'rounded-l-md bg-zinc-100 [&>button]:bg-zinc-900 [&>button]:text-white [&>button]:hover:bg-zinc-800',
+  range_end: 'rounded-r-md bg-zinc-100 [&>button]:bg-zinc-900 [&>button]:text-white [&>button]:hover:bg-zinc-800',
+  range_middle: 'bg-zinc-100 [&>button]:rounded-none [&>button]:hover:bg-zinc-200',
+  today: '[&>button]:font-semibold [&>button]:text-zinc-900 [&>button]:underline [&>button]:underline-offset-4',
+  selected: '[&>button]:bg-zinc-900 [&>button]:text-white [&>button]:hover:bg-zinc-800',
+  outside: 'text-zinc-300', disabled: 'text-zinc-300 [&>button]:cursor-not-allowed [&>button]:hover:bg-transparent', hidden: 'invisible',
+};
+function DatePicker({ label, value, min, max, onChange }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = e => { if (e.key === 'Escape' || (e.type === 'mousedown' && !box.current?.contains(e.target))) setOpen(false); };
+    document.addEventListener('mousedown', close); document.addEventListener('keydown', close);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', close); };
+  }, [open]);
+  return (
+    <div ref={box} className="relative grid gap-1.5">
+      <span className="text-[13px] text-zinc-500">{label}</span>
+      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} aria-label={`${label}: ${show(value)}`}
+        className={cx('flex h-10 w-full items-center gap-2 rounded-lg border bg-white px-3 text-left text-sm transition hover:bg-zinc-50', open ? 'border-zinc-400 ring-4 ring-zinc-100' : 'border-zinc-200')}>
+        <Icon name="Calendar" className="size-4 text-zinc-500" />
+        <span className="flex-1 font-medium">{show(value)}</span>
+        <Icon name="ChevronDown" className={cx('size-4 text-zinc-400 transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="rise absolute left-0 top-[4.25rem] z-30 rounded-xl border border-zinc-200 bg-white p-3 shadow-xl shadow-zinc-900/10">
+          <DayPicker mode="single" required captionLayout="dropdown" classNames={CALENDAR}
+            selected={toDate(value)} defaultMonth={toDate(value)} startMonth={toDate(min)} endMonth={toDate(max)}
+            disabled={[{ before: toDate(min) }, { after: toDate(max) }]}
+            onSelect={d => { if (d) { onChange(toIso(d)); setOpen(false); } }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ───────── layout pieces ───────── */
+const STEPS = ['Find account', 'Confirm', 'Choose period', 'Preview & download'];
+function Stepper({ current }) {
+  return (
+    <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-zinc-200 bg-white sm:grid-cols-4">
+      {STEPS.map((label, i) => {
+        const done = i < current, active = i === current;
+        return (
+          <div key={label} className={cx('relative px-4 py-3', i > 0 && 'border-l border-zinc-200', i === 2 && 'max-sm:border-l-0 max-sm:border-t', i === 3 && 'max-sm:border-t')}>
+            <span className={cx('absolute inset-x-0 top-0 h-0.5 transition-colors duration-300', active ? 'bg-zinc-900' : done ? 'bg-emerald-500' : 'bg-transparent')} />
+            <div className="flex items-center justify-between">
+              <span className="mono text-[11px] text-zinc-400">STEP {String(i + 1).padStart(2, '0')}</span>
+              {done && <Icon name="CircleCheck" className="size-4 text-emerald-600" />}
+            </div>
+            <p className={cx('mt-1 text-sm font-medium', active ? 'text-zinc-900' : done ? 'text-zinc-700' : 'text-zinc-400')}>{label}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function Section({ title, icon, done, summary, onChange, children, aside }) {
+  if (done) return (
+    <Panel className="rise flex items-center gap-3 px-4 py-3">
+      <Icon name="CircleCheck" className="size-4 shrink-0 text-emerald-600" />
+      <div className="min-w-0 flex-1 truncate text-sm"><span className="text-zinc-500">{title}</span><span className="mx-2 text-zinc-300">/</span><span className="font-medium">{summary}</span></div>
+      {onChange && <Button variant="ghost" size="sm" onClick={onChange}>Change</Button>}
+    </Panel>
+  );
+  return (
+    <Panel className="rise">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <h2 className="flex items-center gap-2 text-[15px] font-medium text-zinc-800"><Icon name={icon} className="size-4 text-zinc-500" />{title}</h2>
+        {aside}
+      </div>
+      <div className="p-4">{children}</div>
+    </Panel>
+  );
+}
+const Logo = ({ size = 'size-7' }) => (
+  <div className={cx('flex items-center justify-center rounded-lg bg-zinc-900 text-white', size)}><Icon name="FileText" className="size-4" /></div>
+);
+
+/* LinkedIn's "in" mark, in its brand blue */
+const LinkedInLogo = ({ className = 'size-4' }) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+    <rect width="24" height="24" rx="4" fill="#0A66C2" />
+    <path fill="#fff" d="M7.12 9.48H4.56V19.5h2.56V9.48zM5.84 4.5a1.48 1.48 0 1 0 0 2.96 1.48 1.48 0 0 0 0-2.96zM19.5 13.6c0-2.7-.58-4.32-3.73-4.32-1.52 0-2.53.83-2.95 1.62h-.04V9.48h-2.45V19.5h2.55v-4.96c0-1.31.25-2.57 1.87-2.57 1.6 0 1.62 1.49 1.62 2.65v4.88h2.56l.02-5.9z" />
+  </svg>
+);
+function BuiltBy() {
+  const [photoOk, setPhotoOk] = useState(true);
+  return (
+    <a href={BUILT_BY.linkedin} target="_blank" rel="noopener noreferrer"
+      className="group mt-8 flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3.5 py-3 transition-colors hover:border-zinc-300 hover:bg-zinc-50">
+      {photoOk
+        ? <img src={BUILT_BY.photo} alt={BUILT_BY.name} onError={() => setPhotoOk(false)} className="size-10 rounded-full border border-zinc-200 object-cover" />
+        : <div className="flex size-10 items-center justify-center rounded-full border border-zinc-200 bg-zinc-50 text-sm font-medium text-zinc-700">{BUILT_BY.name.slice(0, 2).toUpperCase()}</div>}
+      <div className="min-w-0 flex-1 leading-tight">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">Built by</p>
+        <p className="mt-0.5 font-medium">{BUILT_BY.name}</p>
+      </div>
+      <span className="flex items-center gap-1.5 text-sm text-zinc-600 group-hover:text-zinc-900">
+        <LinkedInLogo />LinkedIn<Icon name="ArrowUpRight" className="size-3.5 text-zinc-400 group-hover:text-zinc-700" />
+      </span>
+    </a>
+  );
+}
+
+/* ───────── screens ───────── */
+function Login({ onIn }) {
+  const [code, setCode] = useState(''); const [err, setErr] = useState(null); const [busy, setBusy] = useState(false);
+  const submit = async e => { e.preventDefault(); setBusy(true); setErr(null); await wait(700); setBusy(false);
+    code === 'wrong' ? setErr('That passcode is not valid.') : onIn(); };
+  return (
+    <main className="flex min-h-screen items-center justify-center p-4">
+      <div className="rise w-full max-w-sm">
+        <div className="mb-6 flex items-center gap-2.5"><Logo size="size-8" /><span className="font-semibold tracking-tight">Statements</span></div>
+        <Panel className="p-6">
+          <h1 className="text-lg font-semibold tracking-tight">Sign in</h1>
+          <p className="mt-1 text-sm text-zinc-500">Enter the passcode you were given.</p>
+          <form onSubmit={submit} className="mt-5 grid gap-3">
+            <Field icon="LockKeyhole" id="pc" type="password" autoFocus value={code} onChange={e => setCode(e.target.value)} placeholder="Passcode" />
+            {err && <p className="flex items-center gap-1.5 text-sm text-red-600"><Icon name="CircleAlert" className="size-3.5" />{err}</p>}
+            <Button size="lg" disabled={!code || busy}>{busy ? 'Checking…' : 'Continue'}</Button>
+          </form>
+        </Panel>
+        <p className="mt-4 text-center text-xs text-zinc-400">Prototype: any passcode works, “wrong” shows the error.</p>
+        <BuiltBy />
+      </div>
+    </main>
+  );
+}
+
+function Tool({ scenario, onSignOut }) {
+  const [identifier, setIdentifier] = useState('barrie.morris@example.com');
+  const [candidates, setCandidates] = useState([]);
+  const [account, setAccount] = useState(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [range, setRange] = useState(null);
+  const [rangeLabel, setRangeLabel] = useState('Full history');
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(null);         // { kind: 'lookup'|'preview'|'pdf'|'csv', label }
+  const [error, setError] = useState(null);
+  const bottom = useRef(null);
+
+  const full = account && { from: account.first_transaction_date, to: today() };
+  // Earliest selectable start: January 1 of the year of the first transaction (e.g. Nov 21, 2024 -> Jan 1, 2024).
+  const earliest = account && `${account.first_transaction_date.slice(0, 4)}-01-01`;
+  const step = !account || !confirmed ? (account ? 1 : 0) : preview || busy?.kind === 'preview' ? 3 : 2;
+  useEffect(() => { if (step > 1) bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [step, !!preview]);
+
+  const run = async (kind, label, work) => { setBusy({ kind, label }); setError(null);
+    try { await work(); } catch (e) {
+      setError({ kind, code: e.code, message: e.message, ref: e.ref ?? e.message.match(/ref: ([\w-]+)/)?.[1], retry: () => run(kind, label, work) });
+    } finally { setBusy(null); } };
+  const reset = () => { setCandidates([]); setAccount(null); setConfirmed(false); setRange(null); setPreview(null); setError(null); };
+  const choose = a => { setAccount(a); setCandidates([]); setRange({ from: a.first_transaction_date, to: today() }); setRangeLabel('Full history'); };
+  const [searched, setSearched] = useState('');
+  const searchAgain = () => { setError(null); const el = document.getElementById('identifier'); el?.focus(); el?.select(); };
+  const find = e => { e.preventDefault(); reset(); setSearched(identifier.trim()); run('lookup', 'Finding account', async () => {
+    const r = await fake.lookup(scenario); r.accounts ? setCandidates(r.accounts) : choose(r.account); }); };
+  const build = (r = range) => run('preview', 'Fetching transactions', async () => {
+    const stage = setTimeout(() => setBusy(b => b && { ...b, label: 'Building statement' }), 1000);
+    try { setPreview(await fake.preview(scenario, account, r)); } finally { clearTimeout(stage); } });
+  // After a shortened statement, the next one starts the day after it ended.
+  const continueAfter = endedOn => { const d = toDate(endedOn); d.setDate(d.getDate() + 1);
+    const r = { from: toIso(d), to: range.to }; setRange(r); setRangeLabel('Custom'); setPreview(null); build(r); };
+  const download = kind => run(kind, kind === 'pdf' ? 'Rendering PDF' : 'Preparing CSV', async () => { await fake.download(); toastShow(`${kind.toUpperCase()} downloaded`); });
+
+  const floor = iso => iso < earliest ? earliest : iso;
+  const presets = full && [
+    ['Full history', full],
+    ['This year', { from: floor(`${today().slice(0, 4)}-01-01`), to: today() }],
+    ...[[30, '30 days'], [90, '90 days'], [365, '12 months']].map(([n, label]) => {
+      const s = new Date(); s.setDate(s.getDate() - n + 1);
+      return [label, { from: floor(toIso(s)), to: today() }]; }),
+  ];
+  const setPeriod = (r, label) => { setRange(r); setRangeLabel(label); setPreview(null); };
+  const downloading = busy?.kind === 'pdf' || busy?.kind === 'csv';
+
+  return (
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/90 backdrop-blur">
+        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-4">
+          <div className="flex items-center gap-3 text-sm">
+            <Logo /><span className="font-semibold tracking-tight">Statements</span>
+            <span className="text-zinc-300">/</span>
+            <span className="flex items-center gap-1.5 text-zinc-600"><Icon name="FilePlus2" className="size-4" />New statement</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <IconButton icon="RotateCcw" label="Start over" onClick={() => { reset(); }} />
+            <IconButton icon="LogOut" label="Sign out" onClick={onSignOut} />
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto grid max-w-4xl gap-3 px-4 pb-24 pt-6">
+        <Stepper current={step} />
+
+        <Section title="Find the account" icon="Search" done={confirmed} summary={account && `${account.full_name} · ${account.email}`} onChange={reset}>
+          <form onSubmit={find} className="flex gap-2">
+            <Field icon="Search" id="identifier" value={identifier} onChange={e => setIdentifier(e.target.value)} placeholder="Email address or user ID" />
+            <Button size="lg" disabled={!identifier.trim() || !!busy}>Find</Button>
+          </form>
+          <div className="mt-4 grid gap-3 empty:mt-0">
+            {busy?.kind === 'lookup' && <><LoadingState label={busy.label} /><AccountSkeleton /></>}
+            {error?.kind === 'lookup' && busy === null && <Problem error={error} searched={searched} onSearchAgain={searchAgain} />}
+            {candidates.length > 0 && (
+              <div className="rise grid gap-2">
+                <p className="text-sm text-zinc-500">{candidates.length} accounts match. Choose one:</p>
+                <div className="divide-y divide-zinc-200 overflow-hidden rounded-xl border border-zinc-200">
+                  {candidates.map(c => (
+                    <button key={c.user_id} onClick={() => choose(c)} className="group flex w-full items-center gap-3 bg-white px-4 py-3 text-left transition-colors hover:bg-zinc-50">
+                      <Avatar name={c.full_name} size="sm" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium">{c.full_name} <span className="ml-1 font-normal text-zinc-500">{flag(c.country)} {c.country} · {c.base_currency}</span></p>
+                        <p className="mono truncate text-xs text-zinc-500">{c.user_id}</p>
+                      </div>
+                      <span className="num text-sm text-zinc-600">{c.transaction_count.toLocaleString()} <span className="text-zinc-400">txns</span></span>
+                      <Icon name="ChevronRight" className="size-4 text-zinc-300 group-hover:text-zinc-600" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {account && <AccountCard account={account} confirmed={confirmed} onConfirm={() => setConfirmed(true)} onSearchAgain={reset} />}
+          </div>
+        </Section>
+
+        {confirmed && (
+          <Section title="Choose the period" icon="CalendarRange" done={step === 3} onChange={() => setPreview(null)}
+            summary={range && `${show(range.from)} – ${show(range.to)} · ${rangeLabel}`}>
+            <div className="grid gap-4">
+              <div className="inline-flex w-fit flex-wrap rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
+                {presets.map(([label, r]) => {
+                  const on = rangeLabel === label;
+                  return <button key={label} onClick={() => setPeriod(r, label)}
+                    className={cx('rounded-md px-3 py-1.5 text-sm font-medium transition-colors', on ? 'bg-white text-zinc-900 shadow-sm ring-1 ring-zinc-200' : 'text-zinc-500 hover:text-zinc-900')}>{label}</button>;
+                })}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <DatePicker label="From" value={range.from} min={earliest} max={range.to} onChange={from => setPeriod({ ...range, from }, 'Custom')} />
+                <DatePicker label="To" value={range.to} min={range.from} max={today()} onChange={to => setPeriod({ ...range, to }, 'Custom')} />
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
+                <p className="text-sm text-zinc-500"><span className="num font-medium text-zinc-900">{days(range.from, range.to).toLocaleString()}</span> days selected</p>
+                <Button size="lg" onClick={() => build()} disabled={!!busy}>Preview statement<Icon name="ArrowRight" /></Button>
+              </div>
+              {error?.kind === 'preview' && busy === null && <Problem error={error} />}
+            </div>
+          </Section>
+        )}
+
+        {step === 3 && (
+          <Section title="Preview and download" icon="FileText"
+            aside={preview && (
+              <div className="flex items-center gap-2">
+                {downloading && <LoadingState label={busy.label} />}
+                <Button variant="tactileLight" className="min-w-[112px]" onClick={() => download('csv')} disabled={!!busy}><Icon name="FileSpreadsheet" />CSV</Button>
+                <Button variant="tactile" className="min-w-[112px]" onClick={() => download('pdf')} disabled={!!busy}><Icon name="Download" />PDF</Button>
+              </div>
+            )}>
+            {busy?.kind === 'preview' && <div className="grid gap-4"><LoadingState label={busy.label} /><DocumentSkeleton /></div>}
+            {preview && (
+              <div className="rise grid gap-4">
+                <Strip cols={3}>
+                  <Cell label="Period" value={`${show(preview.meta.effective_period.from)} – ${show(preview.meta.effective_period.to)}`} sub={rangeLabel} />
+                  <Cell label="Transactions" value={preview.meta.output_txn_count.toLocaleString()} big
+                    sub={preview.meta.is_truncated ? `of ${preview.meta.input_txn_count.toLocaleString()} in range` : 'All in range'} />
+                  <Cell label="Coverage" value={<span className="flex items-center gap-2"><span className={cx('size-2 rounded-full', preview.meta.is_truncated ? 'bg-amber-500' : 'bg-emerald-500')} />{preview.meta.is_truncated ? 'Partial' : 'Complete'}</span>}
+                    sub={preview.meta.is_truncated ? 'Record limit reached' : 'Every transaction included'} />
+                </Strip>
+                {preview.meta.is_truncated && (() => { const ended = preview.meta.effective_period.to; const next = toDate(ended); next.setDate(next.getDate() + 1); return (
+                  <Notice tone="warning" icon="ListEnd" title="Statement shortened"
+                    actions={<Button variant="tactileLight" size="sm" onClick={() => continueAfter(ended)}>Continue from {show(toIso(next))}<Icon name="ArrowRight" className="size-3.5" /></Button>}>
+                    <span className="num font-medium text-zinc-900">{preview.meta.output_txn_count.toLocaleString()}</span> of {preview.meta.input_txn_count.toLocaleString()} transactions fit in one statement, so it ends on {show(ended)}. The next statement picks up from there.
+                  </Notice>); })()}
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 sm:p-6">
+                  <iframe title="Statement preview" sandbox="allow-same-origin" srcDoc={preview.html} className="mx-auto block h-[70vh] w-full max-w-2xl rounded-md border border-zinc-200 bg-white" />
+                </div>
+              </div>
+            )}
+          </Section>
+        )}
+        <div ref={bottom} />
+      </main>
+    </div>
+  );
+}
+
+/* ───────── toast + scenario switcher (prototype only) ───────── */
+let toastShow = () => {};
+function Toast() {
+  const [msg, setMsg] = useState(null);
+  useEffect(() => { toastShow = m => { setMsg(m); setTimeout(() => setMsg(null), 2200); }; }, []);
+  return msg && <div className="rise fixed bottom-6 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-sm shadow-lg"><Icon name="CircleCheck" className="size-4 text-emerald-600" />{msg}</div>;
+}
+
+function App() {
+  const [signedIn, setSignedIn] = useState(false);
+  const [scenario, setScenario] = useState('found');
+  const [key, setKey] = useState(0);
+  return (
+    <>
+      {signedIn ? <Tool key={key} scenario={scenario} onSignOut={() => setSignedIn(false)} /> : <Login onIn={() => setSignedIn(true)} />}
+      <Toast />
+      <div className="fixed bottom-4 right-4 z-20 w-60 rounded-lg border border-dashed border-zinc-300 bg-white/95 p-3 text-xs shadow-sm backdrop-blur">
+        <p className="mb-2 font-medium uppercase tracking-wide text-zinc-400">Prototype scenario</p>
+        <div className="grid gap-1">
+          {Object.entries(SCENARIOS).map(([k, label]) => (
+            <label key={k} className="flex cursor-pointer items-center gap-2"><input type="radio" checked={scenario === k} onChange={() => { setScenario(k); setKey(x => x + 1); }} />{label}</label>
+          ))}
+        </div>
+        <button className="mt-2 text-zinc-500 underline" onClick={() => { setSignedIn(s => !s); setKey(x => x + 1); }}>{signedIn ? 'Show login screen' : 'Skip login'}</button>
+      </div>
+    </>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

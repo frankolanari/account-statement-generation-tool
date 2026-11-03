@@ -1,0 +1,29 @@
+/* Beautiful UI (beautifului.dev, MIT): only the tokens and keyframes LoadingState uses.
+ * The full foundation.css is not imported because it redefines shadcn's accent, fonts and base styles. */
+:root {
+  --ink: oklch(0.247 0.006 258.361);
+  --ink-3: oklch(0.695 0.009 264.505);
+  --tooltip-bg: oklch(0.272 0.008 264.435);
+  --tooltip-muted: oklch(0.731 0.008 260.731);
+}
+.dark {
+  --ink: oklch(0.964 0.002 247.839);
+  --ink-3: oklch(0.541 0.01 264.484);
+  --tooltip-bg: oklch(0.182 0.004 264.459);
+}
+@theme inline {
+  --color-ink-3: var(--ink-3);
+}
+@keyframes shimmer-text {
+  from { background-position: 150% center; }
+  to { background-position: -50% center; }
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes pixel-on {
+  0%, 100% { opacity: 0.15; }
+  18%, 42% { opacity: 1; }
+  62% { opacity: 0.15; }
+}
